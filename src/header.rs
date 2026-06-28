@@ -40,7 +40,6 @@ pub struct Header {
 }
 
 impl Header {
-    #[cfg(feature = "std")]
     pub fn new(size: u64) -> Header {
         let uuid = uuid::Uuid::new_v4();
         let mut header = Header {

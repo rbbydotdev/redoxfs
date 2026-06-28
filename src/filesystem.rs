@@ -7,7 +7,6 @@ use alloc::{
 use syscall::error::{Error, Result, EKEYREJECTED, ENOENT, ENOKEY};
 use xts_mode::{get_tweak_default, Xts128};
 
-#[cfg(feature = "std")]
 use crate::{AllocEntry, AllocList, BlockData, BlockTrait, Key, KeySlot, Node, Salt, TreeList};
 use crate::{
     Allocator, BlockAddr, BlockLevel, BlockMeta, Disk, Header, Transaction, BLOCK_SIZE,
@@ -40,7 +39,13 @@ impl<D: Disk> FileSystem<D> {
         block_opt: Option<u64>,
         cleanup: bool,
     ) -> Result<Self> {
-        for ring_block in block_opt.map_or(0..65536, |x| x..x + 1) {
+        // Never scan past the end of the disk while hunting for the header ring.
+        // On a small SAB-backed disk (e.g. 128 MiB) a missing/relocated header
+        // would otherwise run the 0..65536 scan straight off the end and trip the
+        // backend's block-range guard with EIO instead of a clean ENOENT.
+        let disk_blocks = disk.size()? / BLOCK_SIZE;
+        let scan_end = core::cmp::min(65536u64, disk_blocks);
+        for ring_block in block_opt.map_or(0u64..scan_end, |x| x..x + 1) {
             let mut header = Header::default();
             unsafe { disk.read_at(ring_block, &mut header)? };
 
@@ -49,7 +54,14 @@ impl<D: Disk> FileSystem<D> {
                 continue;
             }
 
-            let block = ring_block - (header.generation() % HEADER_RING);
+            // The ring base is `ring_block - (gen % HEADER_RING)`.  If that would
+            // underflow, this "valid" header sits below where its generation says
+            // the ring starts — i.e. it's a false-positive in a pre-ring block;
+            // skip it rather than read the inner ring at a wild (wrapped) offset.
+            let block = match ring_block.checked_sub(header.generation() % HEADER_RING) {
+                Some(b) => b,
+                None => continue,
+            };
             for i in 0..HEADER_RING {
                 let mut other_header = Header::default();
                 unsafe { disk.read_at(block + i, &mut other_header)? };
@@ -111,7 +123,6 @@ impl<D: Disk> FileSystem<D> {
     }
 
     /// Create a file system on a disk
-    #[cfg(feature = "std")]
     pub fn create(
         disk: D,
         password_opt: Option<&[u8]>,
@@ -124,7 +135,6 @@ impl<D: Disk> FileSystem<D> {
     /// Create a file system on a disk, with reserved data at the beginning
     /// Reserved data will be zero padded up to the nearest block
     /// We need to pass ctime and ctime_nsec in order to initialize the unix timestamps
-    #[cfg(feature = "std")]
     pub fn create_reserved(
         mut disk: D,
         password_opt: Option<&[u8]>,
