@@ -1,0 +1,19 @@
+Cargo.toml
+  s_72133a35427727::t_3a3c587cbd12ac 52,62,96-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c965278a5a361ff72951611edb22073abe8bb39d",
+  "prompts": {},
+  "sessions": {
+    "s_72133a35427727": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f34bcd47-21c3-4601-a2d7-4c91fb50415a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
