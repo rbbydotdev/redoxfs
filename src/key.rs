@@ -10,7 +10,6 @@ pub struct Key([u8; 16]);
 
 impl Key {
     /// Generate a random key
-    #[cfg(feature = "std")]
     pub fn new() -> Result<Self, getrandom::Error> {
         let mut bytes = [0; 16];
         getrandom::getrandom(&mut bytes)?;
@@ -48,7 +47,6 @@ pub struct Salt([u8; 16]);
 
 impl Salt {
     /// Generate a random salt
-    #[cfg(feature = "std")]
     pub fn new() -> Result<Self, getrandom::Error> {
         let mut bytes = [0; 16];
         getrandom::getrandom(&mut bytes)?;

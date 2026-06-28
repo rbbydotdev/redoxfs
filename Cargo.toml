@@ -49,7 +49,7 @@ base64ct = { version = "1", default-features = false }
 bitflags = "2"
 endian-num = "0.1"
 env_logger = { version = "0.11", optional = true }
-getrandom = { version = "0.2.5", optional = true }
+getrandom = { version = "0.2.5", features = ["custom"] }
 humansize = { version = "2", optional = true }
 libc = "0.2"
 log = { version = "0.4.14", default-features = false, optional = true }
@@ -59,7 +59,7 @@ range-tree = { version = "0.1", optional = true }
 redox_syscall = "0.7.5"
 seahash = { version = "4.1.0", default-features = false }
 termion = { version = "4", optional = true }
-uuid = { version = "1.4", default-features = false }
+uuid = { version = "=1.10.0", default-features = false, features = ["v4"] }
 xts-mode = { version = "0.5", default-features = false }
 
 [features]
@@ -70,7 +70,6 @@ fuse = [
 ]
 std = [
     "env_logger",
-    "getrandom",
     "humansize",
     "libredox",
     "parse-size",
@@ -94,3 +93,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
+
+[patch.crates-io]
+redox_syscall = { path = "../vendored/redox_syscall" }
