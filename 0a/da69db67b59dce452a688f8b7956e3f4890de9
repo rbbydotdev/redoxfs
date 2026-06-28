@@ -1,0 +1,31 @@
+src/allocator.rs
+  s_72133a35427727::t_2773ebd348f6c6 344-442,448-452
+src/block.rs
+  s_72133a35427727::t_24f4bc74091fc4 78-88
+src/filesystem.rs
+  s_72133a35427727::t_bf5378adf8a50c 3,16-17,30,32-36,47-53,62-69,116,198
+src/header.rs
+  s_72133a35427727::t_8914bda7ae55cf 8-10,36-39,41,170-171
+src/lib.rs
+  s_72133a35427727::t_4346dad45579d9 24-27
+src/tests.rs
+  s_72133a35427727::t_983fe4b8ad06d3 1105-1181
+src/transaction.rs
+  s_72133a35427727::t_14bb0566d7db81 2,19-21,77-79,86,95,273-353,356-358,362-371,378-400,605-609
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0ada69db67b59dce452a688f8b7956e3f4890de9",
+  "prompts": {},
+  "sessions": {
+    "s_72133a35427727": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f34bcd47-21c3-4601-a2d7-4c91fb50415a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
