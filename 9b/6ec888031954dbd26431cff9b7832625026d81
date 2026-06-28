@@ -1,0 +1,19 @@
+src/filesystem.rs
+  s_72133a35427727::t_99dd1034ce2749 42-48,57-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "9b6ec888031954dbd26431cff9b7832625026d81",
+  "prompts": {},
+  "sessions": {
+    "s_72133a35427727": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f34bcd47-21c3-4601-a2d7-4c91fb50415a",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
