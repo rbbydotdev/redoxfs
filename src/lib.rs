@@ -21,7 +21,10 @@ pub const DIR_ENTRY_MAX_LENGTH: usize = 252;
 
 pub static IS_UMT: AtomicUsize = AtomicUsize::new(0);
 
-pub use self::allocator::{AllocEntry, AllocList, Allocator, ReleaseList, ALLOC_LIST_ENTRIES};
+pub use self::allocator::{
+    AllocEntry, AllocList, Allocator, QuarantineEntry, QuarantineList, ReleaseList,
+    ALLOC_LIST_ENTRIES, QUARANTINE_LIST_ENTRIES,
+};
 #[cfg(feature = "std")]
 pub use self::archive::{archive, archive_at};
 pub use self::block::{

@@ -75,6 +75,17 @@ impl BlockAddr {
     pub fn is_null(&self) -> bool {
         self.index() == 0
     }
+
+    /// The packed `u64` representation (index + level + decomp level). Used to store a freed block
+    /// in the on-disk epoch-reclaim quarantine and reconstruct it later via [`BlockAddr::from_raw`].
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct from [`BlockAddr::raw`]. Unsafe: the caller asserts `v` came from a real addr.
+    pub unsafe fn from_raw(v: u64) -> Self {
+        Self(v)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

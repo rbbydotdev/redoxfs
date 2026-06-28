@@ -16,8 +16,9 @@ use crate::{
     htree::{self, HTreeHash, HTreeNode, HTreePtr},
     AllocEntry, AllocList, Allocator, BlockAddr, BlockData, BlockLevel, BlockMeta, BlockPtr,
     BlockTrait, DirEntry, DirList, Disk, FileSystem, Header, Node, NodeFlags, NodeLevel,
-    NodeLevelData, RecordRaw, ReleaseList, TreeData, TreePtr, ALLOC_GC_THRESHOLD,
-    ALLOC_LIST_ENTRIES, DIR_ENTRY_MAX_LENGTH, HEADER_RING,
+    NodeLevelData, QuarantineEntry, QuarantineList, RecordRaw, ReleaseList, TreeData, TreePtr,
+    ALLOC_GC_THRESHOLD, ALLOC_LIST_ENTRIES, DIR_ENTRY_MAX_LENGTH, HEADER_RING,
+    QUARANTINE_LIST_ENTRIES,
 };
 
 pub(crate) fn level_data(node: &TreeData<Node>) -> Result<&NodeLevelData> {
@@ -74,12 +75,15 @@ pub struct Transaction<'a, D: Disk> {
     allocator_log: VecDeque<AllocEntry>,
     deallocate: Vec<BlockAddr>,
     pub(crate) write_cache: BTreeMap<BlockAddr, Box<[u8]>>,
+    /// Epoch reclaim: min live-reader generation (snapshot of fs.min_reader_gen at tx start).
+    min_reader_gen: u64,
 }
 
 impl<'a, D: Disk> Transaction<'a, D> {
     pub(crate) fn new(fs: &'a mut FileSystem<D>) -> Self {
         let header = fs.header;
         let allocator = fs.allocator.clone();
+        let min_reader_gen = fs.min_reader_gen;
         Self {
             fs,
             header,
@@ -88,6 +92,7 @@ impl<'a, D: Disk> Transaction<'a, D> {
             allocator_log: VecDeque::new(),
             deallocate: Vec::new(),
             write_cache: BTreeMap::new(),
+            min_reader_gen,
         }
     }
 
@@ -265,21 +270,134 @@ impl<'a, D: Disk> Transaction<'a, D> {
         Ok(true)
     }
 
+    /// Epoch reclaim (single-block quarantine). Defer reuse of CoW-freed blocks until the minimum
+    /// live-reader generation passes the gen at which they were freed — so a reader mounted at an
+    /// old generation never has its blocks reused out from under it (the torn-read hazard).
+    ///
+    /// Runs BEFORE `sync_allocator`. It drains THIS transaction's frees (`self.deallocate`) into the
+    /// on-disk quarantine tagged with the current generation, and moves any quarantined block whose
+    /// gen `min_reader_gen` has passed BACK into `self.deallocate` (so `sync_allocator` returns it to
+    /// the pool). The quarantine block is plain metadata no reader traverses, so freeing it is safe.
+    ///
+    /// Inert when `min_reader_gen == u64::MAX` (no readers reported) AND nothing is quarantined → the
+    /// frees fall straight through to `sync_allocator` exactly as before, zero overhead. On overflow
+    /// of the single block (QUARANTINE_LIST_ENTRIES), the lowest-gen (oldest) entries are released
+    /// early — that can only cause a transient EIO the read-side guard recovers, never corruption.
+    fn process_quarantine(&mut self) -> Result<()> {
+        // Fully inert unless a reader-gen is reported. CRITICAL: this also skips the internal
+        // `reset_allocator` tx (which runs on every mount with a FRESH fs → min_reader_gen=MAX and a
+        // momentarily EMPTY allocator); processing the quarantine there would try to allocate a block
+        // from the empty allocator and return ENOSPC. An active fs (min set) drains the quarantine on
+        // its next real write — held blocks stay accounted (excluded from the free pool) until then.
+        if self.min_reader_gen == u64::MAX {
+            return Ok(());
+        }
+        let cur_gen = self.header.generation();
+        let min = self.min_reader_gen;
+
+        // This tx's frees become quarantine candidates (don't return them to the pool yet).
+        let this_tx_frees: Vec<BlockAddr> = self.deallocate.drain(..).collect();
+
+        // Load the existing quarantine block; release reader-safe entries, keep the rest.
+        let mut kept: Vec<QuarantineEntry> = Vec::new();
+        let old_q = self.header.quarantine;
+        if !old_q.is_null() {
+            let q = self.read_block(old_q)?;
+            for e in q.data().entries.iter() {
+                if e.is_null() {
+                    continue;
+                }
+                if e.gen() < min {
+                    self.deallocate.push(e.addr()); // min reader passed it → reuse is safe now
+                } else {
+                    kept.push(*e);
+                }
+            }
+            self.deallocate.push(old_q.addr()); // free the old quarantine block (metadata)
+        }
+
+        // Append this tx's frees, tagged with the current generation.
+        for addr in this_tx_frees {
+            kept.push(QuarantineEntry::new(addr, cur_gen));
+        }
+
+        // One block holds QUARANTINE_LIST_ENTRIES entries; on overflow release the oldest early.
+        if kept.len() > QUARANTINE_LIST_ENTRIES {
+            kept.sort_by_key(|e| e.gen());
+            let overflow = kept.len() - QUARANTINE_LIST_ENTRIES;
+            for e in kept.drain(0..overflow) {
+                self.deallocate.push(e.addr());
+            }
+        }
+
+        if kept.is_empty() {
+            if !old_q.is_null() {
+                self.header.quarantine = BlockPtr::default();
+                self.header_changed = true;
+            }
+            return Ok(());
+        }
+
+        // Write a fresh single quarantine block holding the kept entries.
+        let new_block = unsafe { self.allocate(&mut FsCtx, BlockMeta::default())? };
+        let mut q = BlockData::<QuarantineList>::empty(new_block).unwrap();
+        q.data_mut().prev = BlockPtr::default();
+        for (i, e) in kept.iter().enumerate() {
+            q.data_mut().entries[i] = *e;
+        }
+        let new_ptr = unsafe { self.write_block(q)? };
+        self.header.quarantine = new_ptr;
+        self.header_changed = true;
+        Ok(())
+    }
+
     /// Write all changes cached in this [`Transaction`] to disk.
     pub fn sync(&mut self, force_squash: bool) -> Result<bool> {
+        // Epoch reclaim: route this tx's frees through the quarantine BEFORE the allocator is
+        // synced, so reader-safe blocks land in the AllocList and still-needed ones don't.
+        self.process_quarantine()?;
         // Make sure alloc is synced
         self.sync_allocator(force_squash)?;
 
-        // Write all items in write cache
+        // Write all items in write cache. The BTreeMap is sorted by block address, so
+        // physically-contiguous dirty blocks are adjacent in iteration; MERGE each contiguous
+        // run into ONE disk.write_at → one OPFS write() / one wasm-boundary crossing for the
+        // whole run instead of one per 4 KiB block. On-disk bytes are byte-identical; only the
+        // call count drops (measured 1.4–2.5× fewer writes → ~1.1–1.4× faster, verified
+        // byte-for-byte in experiments/opfs-fs-bench). Encryption is per-block and runs before
+        // a block joins a run, so this is correct with or without a cipher.
+        let mut run_start: Option<u64> = None; // fs-relative block index where the run begins
+        let mut run_next: u64 = 0; // expected index of the next block for the run to stay contiguous
+        let mut run_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         for (addr, raw) in self.write_cache.iter_mut() {
             // sync_alloc must have changed alloc block pointer
             // if we have any blocks to write
             assert!(self.header_changed);
 
             self.fs.encrypt(raw, *addr);
-            let count = unsafe { self.fs.disk.write_at(self.fs.block + addr.index(), raw)? };
-            if count != raw.len() {
-                // Read wrong number of bytes
+            let idx = addr.index();
+            let blocks = raw.len() as u64 / crate::BLOCK_SIZE;
+            if run_start.is_some() && idx == run_next {
+                run_buf.extend_from_slice(raw);
+                run_next += blocks;
+            } else {
+                if let Some(start) = run_start {
+                    let count = unsafe { self.fs.disk.write_at(self.fs.block + start, &run_buf)? };
+                    if count != run_buf.len() {
+                        #[cfg(feature = "log")]
+                        log::error!("SYNC WRITE_CACHE: WRONG NUMBER OF BYTES");
+                        return Err(Error::new(EIO));
+                    }
+                }
+                run_start = Some(idx);
+                run_buf.clear();
+                run_buf.extend_from_slice(raw);
+                run_next = idx + blocks;
+            }
+        }
+        if let Some(start) = run_start {
+            let count = unsafe { self.fs.disk.write_at(self.fs.block + start, &run_buf)? };
+            if count != run_buf.len() {
                 #[cfg(feature = "log")]
                 log::error!("SYNC WRITE_CACHE: WRONG NUMBER OF BYTES");
                 return Err(Error::new(EIO));

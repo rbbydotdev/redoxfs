@@ -5,7 +5,9 @@ use endian_num::Le;
 use aes::Aes128;
 use xts_mode::{get_tweak_default, Xts128};
 
-use crate::{AllocList, BlockPtr, KeySlot, ReleaseList, Tree, BLOCK_SIZE, SIGNATURE, VERSION};
+use crate::{
+    AllocList, BlockPtr, KeySlot, QuarantineList, ReleaseList, Tree, BLOCK_SIZE, SIGNATURE, VERSION,
+};
 
 pub const HEADER_RING: u64 = 256;
 
@@ -31,8 +33,12 @@ pub struct Header {
     pub key_slots: [KeySlot; 64],
     /// Nodes pending release, may be null
     pub release: BlockPtr<ReleaseList>,
+    /// Epoch-reclaim quarantine chain: blocks freed but not yet reusable (a live reader may still
+    /// be traversing them). May be null. Carved from the former padding → zero on pre-epoch images,
+    /// which reads back as a null pointer (no quarantine), so old images mount unchanged.
+    pub quarantine: BlockPtr<QuarantineList>,
     /// Padding
-    pub padding: [u8; BLOCK_SIZE as usize - 3192],
+    pub padding: [u8; BLOCK_SIZE as usize - 3208],
     /// encrypted hash of header data without hash, set to hash and padded if disk is not encrypted
     pub encrypted_hash: [u8; 16],
     /// hash of header data without hash
@@ -161,7 +167,8 @@ impl Default for Header {
             alloc: BlockPtr::<AllocList>::default(),
             key_slots: [KeySlot::default(); 64],
             release: BlockPtr::<ReleaseList>::default(),
-            padding: [0; BLOCK_SIZE as usize - 3192],
+            quarantine: BlockPtr::<QuarantineList>::default(),
+            padding: [0; BLOCK_SIZE as usize - 3208],
             encrypted_hash: [0; 16],
             hash: 0.into(),
         }

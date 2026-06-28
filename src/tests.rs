@@ -1102,3 +1102,80 @@ fn split_htree_with_multiple_levels_using_duplicates() {
         .unwrap();
     });
 }
+
+// Repro of the in-edge next-build #68 wall: next's `conf` telemetry atomically
+// writes /.config/.../config.json TWICE — write a temp file, then rename it OVER
+// the already-existing config.json (a rename_node REPLACE — the path the suite
+// never covered).  On the SAB-disk wasm port this leaves the FS unmountable
+// (FileSystem::open's header-ring scan runs off the end of the disk → EIO).
+// After a rename-replace, re-opening the disk must succeed and read the new bytes.
+#[test]
+fn rename_replace_then_reopen() {
+    let disk_path = format!("rr-image{}.bin", IMAGE_SEQ.fetch_add(1, Relaxed));
+    let size = 128 * 1024 * 1024;
+    let open = |p: &str| {
+        let disk = DiskSparse::create(p, size).unwrap();
+        FileSystem::open(disk, None, None, false)
+    };
+    {
+        let disk = DiskSparse::create(&disk_path, size).unwrap();
+        FileSystem::create(disk, None, 0, 0).unwrap();
+    }
+    let root = TreePtr::<Node>::root();
+    // Churn: each round MOUNTS, does one commit, UNMOUNTS — exactly the glue's
+    // vfs_open→op→syncReader cycle.  Advance the generation well past the
+    // 256-slot header ring (gen-wrap is the suspected trigger).
+    for i in 0..400u32 {
+        let mut fs = open(&disk_path).expect("churn re-open");
+        fs.tx(|tx| {
+            let n = match tx.find_node(root, "churn") {
+                Ok(n) => n.ptr(),
+                Err(_) => tx
+                    .create_node(root, "churn", Node::MODE_FILE | 0o644, 0, 0)?
+                    .ptr(),
+            };
+            tx.write_node(n, 0, format!("churn#{i}").as_bytes(), 0, 0)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    // Prior config.json exists.
+    {
+        let mut fs = open(&disk_path).expect("open to create target");
+        fs.tx(|tx| {
+            let n = tx
+                .create_node(root, "config.json", Node::MODE_FILE | 0o644, 0, 0)?
+                .ptr();
+            tx.write_node(n, 0, b"{\"old\":1}", 0, 0)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    // Atomic write: temp file, then rename-REPLACE over the existing config.json.
+    {
+        let mut fs = open(&disk_path).expect("open to replace");
+        fs.tx(|tx| {
+            let n = tx
+                .create_node(root, "config.json.tmp", Node::MODE_FILE | 0o644, 0, 0)?
+                .ptr();
+            tx.write_node(n, 0, b"{\"new\":2}", 0, 0)?;
+            Ok(())
+        })
+        .unwrap();
+        fs.tx(|tx| tx.rename_node(root, "config.json.tmp", root, "config.json"))
+            .unwrap();
+    }
+    // The syncReader re-open that EIOs in-edge.
+    let mut fs = open(&disk_path).expect("re-open after a rename-REPLACE must succeed (next-build #68)");
+    let n = fs
+        .tx(|tx| tx.find_node(root, "config.json"))
+        .expect("config.json must exist after the replace");
+    let mut buf = [0u8; 64];
+    let read = fs.tx(|tx| tx.read_node(n.ptr(), 0, &mut buf, 0, 0)).unwrap();
+    assert_eq!(
+        &buf[..read],
+        b"{\"new\":2}",
+        "config.json must hold the NEW (post-replace) bytes"
+    );
+    let _ = fs::remove_file(&disk_path);
+}

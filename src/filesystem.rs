@@ -29,6 +29,11 @@ pub struct FileSystem<D: Disk> {
     pub(crate) cipher_opt: Option<Xts128<Aes128>>,
     pub(crate) compress_cache: Box<[u8]>,
     pub node_usages: BTreeMap<u32, u64>,
+    /// Epoch reclaim: the minimum generation any LIVE reader is currently reading at, set by the
+    /// embedder before a write (the glue's `vfs_set_min_reader_gen`). A freed block tagged with
+    /// gen G stays quarantined until `min_reader_gen > G`. `u64::MAX` = no readers reported → reuse
+    /// freely (epoch reclaim inert = original behavior). NOT persisted (runtime coordination only).
+    pub min_reader_gen: u64,
 }
 
 impl<D: Disk> FileSystem<D> {
@@ -108,6 +113,7 @@ impl<D: Disk> FileSystem<D> {
                 cipher_opt,
                 compress_cache: compress_cache(),
                 node_usages: BTreeMap::new(),
+                min_reader_gen: u64::MAX,
             };
 
             unsafe { fs.reset_allocator()? };
@@ -189,6 +195,7 @@ impl<D: Disk> FileSystem<D> {
             cipher_opt,
             compress_cache: compress_cache(),
             node_usages: BTreeMap::new(),
+            min_reader_gen: u64::MAX,
         };
 
         // Write header generation zero

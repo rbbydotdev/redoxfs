@@ -341,9 +341,113 @@ impl ops::DerefMut for ReleaseList {
     }
 }
 
+pub const QUARANTINE_LIST_ENTRIES: usize = (BLOCK_SIZE as usize
+    - mem::size_of::<BlockPtr<QuarantineList>>())
+    / mem::size_of::<QuarantineEntry>();
+
+/// Epoch reclaim: a freed block held OUT of the free pool until no live reader can still be
+/// traversing it. `addr` is a [`BlockAddr::raw`]; `gen` is the generation at which it was freed
+/// (a reader at gen ≤ `gen` may still read the block, so it can't be reused until the minimum
+/// live-reader generation passes `gen`).
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct QuarantineEntry {
+    addr: Le<u64>,
+    gen: Le<u64>,
+}
+
+impl QuarantineEntry {
+    pub fn new(addr: BlockAddr, gen: u64) -> Self {
+        Self {
+            addr: addr.raw().into(),
+            gen: gen.into(),
+        }
+    }
+
+    pub fn addr(&self) -> BlockAddr {
+        // Safe-ish: only constructed from a real BlockAddr::raw via `new`.
+        unsafe { BlockAddr::from_raw(self.addr.to_ne()) }
+    }
+
+    pub fn gen(&self) -> u64 {
+        self.gen.to_ne()
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.addr.to_ne() == 0
+    }
+}
+
+/// A node in the quarantine chain (CoW, like [`AllocList`]). Newest entries are appended; entries
+/// whose `gen` has been passed by the min live-reader generation are released back to the allocator.
+#[repr(C, packed)]
+pub struct QuarantineList {
+    /// A pointer to the previous QuarantineList. Null = first element of the chain.
+    pub prev: BlockPtr<QuarantineList>,
+    /// Quarantine entries.
+    pub entries: [QuarantineEntry; QUARANTINE_LIST_ENTRIES],
+}
+
+unsafe impl BlockTrait for QuarantineList {
+    fn empty(level: BlockLevel) -> Option<Self> {
+        if level.0 == 0 {
+            Some(Self {
+                prev: BlockPtr::default(),
+                entries: [QuarantineEntry::default(); QUARANTINE_LIST_ENTRIES],
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Debug for QuarantineList {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let prev = self.prev;
+        let entries: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_null())
+            .map(|entry| (entry.addr().index(), entry.gen()))
+            .collect();
+        f.debug_struct("QuarantineList")
+            .field("prev", &prev)
+            .field("entries", &entries)
+            .finish()
+    }
+}
+
+impl ops::Deref for QuarantineList {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        unsafe {
+            slice::from_raw_parts(
+                self as *const QuarantineList as *const u8,
+                mem::size_of::<QuarantineList>(),
+            ) as &[u8]
+        }
+    }
+}
+
+impl ops::DerefMut for QuarantineList {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            slice::from_raw_parts_mut(
+                self as *mut QuarantineList as *mut u8,
+                mem::size_of::<QuarantineList>(),
+            ) as &mut [u8]
+        }
+    }
+}
+
 #[test]
 fn alloc_node_size_test() {
     assert_eq!(mem::size_of::<AllocList>(), crate::BLOCK_SIZE as usize);
+}
+
+#[test]
+fn quarantine_node_size_test() {
+    assert_eq!(mem::size_of::<QuarantineList>(), crate::BLOCK_SIZE as usize);
 }
 
 #[test]
